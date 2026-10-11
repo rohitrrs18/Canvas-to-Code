@@ -1,21 +1,36 @@
-export type ComponentType =
+export type UIComponentType =
   | "container" | "heading" | "paragraph" | "button"
   | "image" | "input" | "divider";
+
+export type DiagramComponentType =
+  | "flow-node"
+  | "flow-edge"
+  | "uml-class"
+  | "uml-edge"
+  | "seq-actor"
+  | "seq-message";
+
+export type ComponentType = UIComponentType | DiagramComponentType;
+
+export type EditorMode = "ui" | "diagram";
 
 export interface LayoutNode {
   id: string;
   type: ComponentType;
-  props: Record<string, string>;
+  props: Record<string, any>;
   children: string[];
   parentId: string | null;
   order: number;
+  x?: number;
+  y?: number;
+  from?: string;
+  to?: string;
 }
 
 export type OpType =
   | "ADD_NODE" | "REMOVE_NODE" | "MOVE_NODE"
-  | "UPDATE_PROPS" | "RESET";
+  | "UPDATE_PROPS" | "RESET" | "SET_MODE";
 
-/** Vector clock: clientId → monotonic counter. */
 export type VectorClock = Record<string, number>;
 
 export interface Op {
@@ -23,10 +38,8 @@ export interface Op {
   type: OpType;
   timestamp: number;
   clientId: string;
-  /** Vector clock at time of creation. */
   vclock: VectorClock;
   payload: any;
-  /** Op this one was created against — for causal replay. */
   deps?: string[];
 }
 
@@ -38,7 +51,6 @@ export interface LayoutState {
 
 export interface JournalEntry {
   op: Op;
-  /** 0 = not flushed, 1 = in IndexedDB, 2 = synced to remote. */
   durability: 0 | 1 | 2;
 }
 

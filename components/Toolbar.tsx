@@ -4,6 +4,8 @@ import { RotateCcw, Trash2 } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { ThemeToggle } from "./ThemeToggle";
 import { SyncStatus } from "./SyncStatus";
+import { AIComposer } from "./AIComposer";
+import { ModeSwitcher } from "./ModeSwitcher";
 
 export function Toolbar() {
   const reset = useStore((s) => s.reset);
@@ -23,9 +25,11 @@ export function Toolbar() {
             Crash-safe prototyping
           </p>
         </div>
+        <ModeSwitcher />
       </div>
 
       <div className="flex items-center gap-2">
+        <AIComposer />
         <SyncStatus />
 
         <button

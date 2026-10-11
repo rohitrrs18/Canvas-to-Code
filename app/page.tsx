@@ -1,17 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useStore } from "@/lib/store";
 import { Toolbar } from "@/components/Toolbar";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { ComponentPalette } from "@/components/ComponentPalette";
+import { DiagramPalette } from "@/components/DiagramPalette";
 import { Canvas } from "@/components/Canvas";
+import { DiagramCanvas } from "@/components/DiagramCanvas";
 import { CodePanel } from "@/components/CodePanel";
 import { RecoveryToast } from "@/components/RecoveryToast";
 
 export default function Home() {
   const hydrate = useStore((s) => s.hydrate);
   const hydrated = useStore((s) => s.hydrated);
+  const mode = useStore((s) => s.mode);
 
   useEffect(() => {
     hydrate();
@@ -22,8 +25,12 @@ export default function Home() {
       <Toolbar />
       <OfflineBanner />
       <div className="flex-1 flex overflow-hidden">
-        <ComponentPalette />
-        {hydrated ? <Canvas /> : <CanvasSkeleton />}
+        {mode === "ui" ? <ComponentPalette /> : <DiagramPalette />}
+        {hydrated ? (
+          mode === "ui" ? <Canvas /> : <DiagramCanvas />
+        ) : (
+          <CanvasSkeleton />
+        )}
         {hydrated ? <CodePanel /> : <CodePanelSkeleton />}
       </div>
       <RecoveryToast />
@@ -31,10 +38,6 @@ export default function Home() {
   );
 }
 
-/**
- * Static wireframe shown for the ~1 frame between first paint and
- * hydration completion. Matches the Canvas chrome so the swap is invisible.
- */
 function CanvasSkeleton() {
   return (
     <main className="flex-1 overflow-auto canvas-grid p-8">
@@ -46,9 +49,6 @@ function CanvasSkeleton() {
               <div className="h-3 w-3 rounded-full bg-yellow-400/50" />
               <div className="h-3 w-3 rounded-full bg-green-400/50" />
             </div>
-            <span className="text-xs text-[var(--text-secondary)] ml-2">
-              preview
-            </span>
           </div>
           <div className="p-6 space-y-3">
             <div className="h-4 w-2/3 rounded bg-[var(--bg-elevated)] animate-pulse" />
@@ -73,11 +73,6 @@ function CodePanelSkeleton() {
         <div className="h-3 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
         <div className="h-3 w-full rounded bg-[var(--bg-elevated)] animate-pulse" />
         <div className="h-3 w-2/3 rounded bg-[var(--bg-elevated)] animate-pulse" />
-        <div className="h-3 w-5/6 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      </div>
-      <div className="h-9 border-t border-[var(--border)] px-3 flex items-center gap-2">
-        <div className="h-2 w-2 rounded-full bg-[var(--bg-elevated)] animate-pulse" />
-        <div className="h-2 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
       </div>
     </aside>
   );

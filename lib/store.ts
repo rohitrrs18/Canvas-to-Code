@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { nanoid } from "nanoid";
-import type { LayoutNode, LayoutState, Op, ComponentType, VectorClock } from "./types";
+import type { LayoutNode, LayoutState, Op, ComponentType, VectorClock, EditorMode } from "./types";
 import { applyOp, createInitialState, replayOps } from "./oplog";
 import { journal } from "./journal";
 import {
@@ -42,15 +42,18 @@ interface Store {
   pendingOps: number;
   code: string;
   layoutHash: string;
+  mode: EditorMode;
 
   hydrate: () => Promise<void>;
-  addNode: (type: ComponentType, parentId?: string) => void;
+  addNode: (type: ComponentType, parentId?: string, prebuilt?: LayoutNode) => void;
   removeNode: (id: string) => void;
-  moveNode: (id: string, newParentId: string, newOrder: number) => void;
-  updateProps: (id: string, props: Record<string, string>) => void;
+  moveNode: (id: string, newParentId: string, newOrder: number, x?: number, y?: number) => void;
+  updateProps: (id: string, props: Record<string, any>) => void;
   selectNode: (id: string | null) => void;
   reset: () => void;
   clearStorage: () => Promise<void>;
+  setMode: (mode: EditorMode) => void;
+  applyAILayout: (ops: any[]) => void;
   _mergeExternal: (ops: Op[]) => void;
 }
 
@@ -58,14 +61,10 @@ function derive(state: LayoutState) {
   return { code: compileToHTML(state), layoutHash: hashLayout(state) };
 }
 
-/** Module-scope timer handle so clearStorage() can stop compaction. */
 let compactionTimer: ReturnType<typeof setInterval> | null = null;
-
-/** The client ID, resolved once at module load. */
 const CLIENT_ID = getClientId();
 
 export const useStore = create<Store>((set, get) => ({
-  // Placeholder initial — replaced during hydrate() with the stable root.
   state: createInitialState(),
   ops: [],
   vclock: {},
@@ -74,18 +73,15 @@ export const useStore = create<Store>((set, get) => ({
   lastSavedAt: null,
   connection: "online",
   pendingOps: 0,
+  mode: "ui",
   ...derive(createInitialState()),
 
   hydrate: async () => {
-    // 1. Load or generate the persistent root ID.
     const persistedRootId = await loadRootId();
     const rootId = persistedRootId ?? nanoid();
     if (!persistedRootId) await saveRootId(rootId);
 
-    // 2. Build a fresh initial state with the STABLE root ID.
     const stableInitial = createInitialState(rootId);
-
-    // 3. Replay persisted ops against it.
     const persisted = await loadPersistedOps();
     const ordered = topoSort(persisted);
     const state = ordered.length > 0
@@ -95,6 +91,15 @@ export const useStore = create<Store>((set, get) => ({
     let vclock: VectorClock = {};
     for (const op of ordered) vclock = mergeClock(vclock, op.vclock);
 
+    // Infer mode from what's in the tree.
+    const hasDiagram = Object.values(state.nodes).some(
+      (n) =>
+        n.type === "flow-node" ||
+        n.type === "uml-class" ||
+        n.type === "seq-actor"
+    );
+    const mode: EditorMode = hasDiagram ? "diagram" : "ui";
+
     journal.reset(ordered);
     set({
       state,
@@ -103,10 +108,10 @@ export const useStore = create<Store>((set, get) => ({
       hydrated: true,
       lastSavedAt: Date.now(),
       pendingOps: journal.pending().length,
+      mode,
       ...derive(state),
     });
 
-    // 4. Notify the recovery toast.
     if (ordered.length > 0 && typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("session-restored", {
@@ -115,7 +120,6 @@ export const useStore = create<Store>((set, get) => ({
       );
     }
 
-    // 5. Start subsystems.
     connection.start();
     outbox.start();
 
@@ -128,7 +132,6 @@ export const useStore = create<Store>((set, get) => ({
       get()._mergeExternal(merged);
     });
 
-    // 6. Subscribe to outbox flush completions.
     if (typeof window !== "undefined") {
       window.addEventListener("ops-synced", ((e: CustomEvent) => {
         const detail = e.detail as { pendingOps: number };
@@ -136,35 +139,33 @@ export const useStore = create<Store>((set, get) => ({
       }) as EventListener);
     }
 
-    // 7. Pull remote ops if we're online.
     if (connection.get() === "online") void pullAndMerge(get);
 
-    // 8. Periodic compaction.
     if (compactionTimer) clearInterval(compactionTimer);
     compactionTimer = setInterval(() => {
       void compactLog(500);
     }, 60_000);
   },
 
-  addNode: (type, parentId) => {
+  addNode: (type, parentId, prebuilt) => {
     const target = parentId ?? get().state.rootId;
-    const node = createNode(type, target);
+    const node = prebuilt ?? createNode(type, target);
     commit("ADD_NODE", { node, parentId: target }, set, get);
   },
 
   removeNode: (id) => commit("REMOVE_NODE", { nodeId: id }, set, get),
 
-  moveNode: (id, newParentId, newOrder) =>
-    commit("MOVE_NODE", { nodeId: id, newParentId, newOrder }, set, get),
+  moveNode: (id, newParentId, newOrder, x, y) =>
+    commit("MOVE_NODE", { nodeId: id, newParentId, newOrder, x, y }, set, get),
 
   updateProps: (id, props) =>
     commit("UPDATE_PROPS", { nodeId: id, props }, set, get),
 
   selectNode: (id) => set((s) => ({ state: { ...s.state, selectedId: id } })),
 
+  setMode: (mode) => set({ mode }),
+
   reset: () => {
-    // Reset generates a NEW root ID and persists it, so future ops
-    // reference the new tree.
     const fresh = createInitialState();
     commit("RESET", { state: fresh }, set, get);
     void saveRootId(fresh.rootId);
@@ -186,33 +187,53 @@ export const useStore = create<Store>((set, get) => ({
       state: fresh,
       ops: [],
       vclock: {},
+      mode: "ui",
       ...derive(fresh),
       lastSavedAt: null,
       pendingOps: 0,
     });
   },
 
+  applyAILayout: (aiOps: any[]) => {
+    for (const raw of aiOps) {
+      const op: Op = {
+        id: nanoid(),
+        type: raw.type,
+        timestamp: Date.now(),
+        clientId: get().clientId,
+        vclock: tick(get().vclock, get().clientId),
+        payload: raw.payload,
+      };
+      commit(op.type, op.payload, set, get);
+    }
+  },
+
   _mergeExternal: (ops) => {
-    // Reuse the CURRENT root ID — the ops we're merging were created
-    // against a tree whose root is already in state.
     const currentRootId = get().state.rootId;
     const stableInitial = createInitialState(currentRootId);
     const state = replayOps(stableInitial, ops);
     let vclock: VectorClock = {};
     for (const op of ops) vclock = mergeClock(vclock, op.vclock);
+
+    const hasDiagram = Object.values(state.nodes).some(
+      (n) =>
+        n.type === "flow-node" ||
+        n.type === "uml-class" ||
+        n.type === "seq-actor"
+    );
+    const mode: EditorMode = hasDiagram ? "diagram" : "ui";
+
     set({
       state,
       ops,
       vclock,
+      mode,
       pendingOps: journal.pending().length,
       ...derive(state),
     });
   },
 }));
 
-/**
- * The single commit path.
- */
 function commit(
   type: Op["type"],
   payload: any,
@@ -252,13 +273,8 @@ function commit(
   }).catch(() => {});
 }
 
-/**
- * Pull remote ops and merge them with the local journal.
- */
 async function pullAndMerge(get: () => Store): Promise<void> {
-  try {
-    await outbox.drain();
-  } catch { /* best-effort */ }
+  try { await outbox.drain(); } catch { /* best-effort */ }
 
   const ops = await pullRemote(get().clientId);
   if (ops.length === 0) {
@@ -293,52 +309,17 @@ function createNode(type: ComponentType, parentId: string): LayoutNode {
     case "container":
       return { ...base, props: { className: "flex flex-col gap-3 p-4" } };
     case "heading":
-      return {
-        ...base,
-        props: { text: "New Heading", className: "text-2xl font-semibold" },
-      };
+      return { ...base, props: { text: "New Heading", className: "text-2xl font-semibold" } };
     case "paragraph":
-      return {
-        ...base,
-        props: {
-          text: "Some descriptive text.",
-          className: "text-base opacity-80",
-        },
-      };
+      return { ...base, props: { text: "Some descriptive text.", className: "text-base opacity-80" } };
     case "button":
-      return {
-        ...base,
-        props: {
-          text: "Click me",
-          className:
-            "px-4 py-2 rounded-lg bg-indigo-500 text-white font-medium hover:bg-indigo-600 transition",
-        },
-      };
+      return { ...base, props: { text: "Click me", className: "px-4 py-2 rounded-lg bg-indigo-500 text-white font-medium hover:bg-indigo-600 transition" } };
     case "image":
-      return {
-        ...base,
-        props: {
-          src: "https://placehold.co/400x300",
-          alt: "Placeholder",
-          className: "rounded-lg w-full",
-        },
-      };
+      return { ...base, props: { src: "https://placehold.co/400x300", alt: "Placeholder", className: "rounded-lg w-full" } };
     case "input":
-      return {
-        ...base,
-        props: {
-          placeholder: "Enter text...",
-          className:
-            "px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900",
-        },
-      };
+      return { ...base, props: { placeholder: "Enter text...", className: "px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900" } };
     case "divider":
-      return {
-        ...base,
-        props: {
-          className: "border-t border-slate-300 dark:border-slate-700 my-2",
-        },
-      };
+      return { ...base, props: { className: "border-t border-slate-300 dark:border-slate-700 my-2" } };
     default:
       return base;
   }
